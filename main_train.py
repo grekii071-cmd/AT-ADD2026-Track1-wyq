@@ -21,6 +21,9 @@ from utils import *
 import eval_metrics as em
 from feature_extraction import *
 import config
+from loss_custom import AMSoftmaxLoss, SupConLoss
+from torch.optim import AdamW
+from transformers import get_linear_schedule_with_warmup
 
 torch.set_default_tensor_type(torch.FloatTensor)
 torch.multiprocessing.set_start_method('spawn', force=True)
@@ -40,6 +43,7 @@ def initParams():
     parser.add_argument('--eps', type=float, default=1e-8, help="epsilon for Adam")
     parser.add_argument("--gpu", type=str, help="GPU index", default="7")
     parser.add_argument('--num_workers', type=int, default=8, help="number of workers")
+    parser.add_argument('--run_lora_test', action='store_true', help='Run a small LoRA memory/param test and exit')
 
     parser.add_argument('--train_task', type=str, default="atadd-track1",
                         choices=["atadd-track1", "atadd-track2"])
@@ -112,6 +116,34 @@ def shuffle(feat, labels):
     return feat, labels
 
 
+def unpack_model_outputs(first, second):
+    if first.dim() > 1 and first.size(-1) == 2 and (second.dim() == 1 or second.size(-1) != 2):
+        return second, first
+    return first, second
+
+
+def build_optimizer(feat_model, args):
+    if hasattr(feat_model, 'wav2vec2') and hasattr(feat_model.wav2vec2, 'model') and hasattr(feat_model.w2vaasist, 'parameters'):
+        ssl_layers = feat_model.wav2vec2.model.encoder.layers
+        layer_split = min(12, len(ssl_layers))
+        param_groups = []
+        if layer_split > 0:
+            param_groups.append({'params': ssl_layers[:layer_split].parameters(), 'lr': args.lr * 0.1})
+        if layer_split < len(ssl_layers):
+            param_groups.append({'params': ssl_layers[layer_split:].parameters(), 'lr': args.lr * 0.5})
+        param_groups.append({'params': feat_model.w2vaasist.parameters(), 'lr': args.lr})
+        optimizer = AdamW(param_groups, weight_decay=1e-4)
+    else:
+        optimizer = AdamW(feat_model.parameters(), lr=args.lr, weight_decay=1e-4)
+    return optimizer
+
+
+def count_params(model):
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return total, trainable
+
+
 def train(args):
     torch.set_default_tensor_type(torch.FloatTensor)
 
@@ -151,14 +183,54 @@ def train(args):
             num_wavelet_tokens=args.num_wavelet_tokens,
             dropout=args.pt_dropout
         ).to(args.device)
-    
-    feat_optimizer = torch.optim.Adam(
-        feat_model.parameters(),
-        lr=args.lr,
-        betas=(args.beta_1, args.beta_2),
-        eps=args.eps,
-        weight_decay=0.0005
-    )
+
+    # LoRA: apply if requested (apply before optimizer creation)
+    if getattr(args, 'use_lora', False):
+        try:
+            if hasattr(feat_model, 'wav2vec2') and hasattr(feat_model.wav2vec2, 'apply_lora'):
+                print(f"Applying LoRA (r={args.lora_r}) to XLSR backbone...")
+                total0, trainable0 = count_params(feat_model.wav2vec2.model)
+                print(f"XLSR baseline params: total={total0:,}, trainable={trainable0:,}")
+                feat_model.wav2vec2.apply_lora(r=getattr(args, 'lora_r', 8))
+                total1, trainable1 = count_params(feat_model.wav2vec2.model)
+                print(f"After LoRA: total={total1:,}, trainable={trainable1:,}")
+            else:
+                print("LoRA not applicable to this model (no wav2vec2.apply_lora). Skipping LoRA.")
+        except Exception as e:
+            print('Error applying LoRA:', e)
+        feat_model = feat_model.to(args.device)
+    if getattr(args, 'run_lora_test', False):
+        # perform a tiny forward to gauge memory usage (may require local pretrained files)
+        try:
+            import numpy as np
+            torch.cuda.empty_cache()
+            dummy = np.zeros(16000, dtype=np.float32)  # 1s of silence
+            device = args.device
+            if hasattr(feat_model, 'wav2vec2'):
+                print('Running tiny forward pass through XLSR feature extractor...')
+                with torch.no_grad():
+                    out = feat_model.wav2vec2.extract_features([dummy])
+                print('Forward done. Current CUDA allocated:', torch.cuda.memory_allocated() if torch.cuda.is_available() else 0)
+            else:
+                print('No wav2vec2 found on model; skipping forward test.')
+        except Exception as e:
+            print('LoRA run test failed (likely missing pretrained model files or OOM):', e)
+        return feat_model
+
+    if getattr(args, 'dry_run', False):
+        print('Dry run enabled. Parameter summary:')
+        total_params, trainable_params = count_params(feat_model)
+        print(f'Total params: {total_params:,}')
+        print(f'Trainable params: {trainable_params:,}')
+        if hasattr(feat_model, 'wav2vec2') and hasattr(feat_model.wav2vec2, 'model'):
+            ssl_total, ssl_trainable = count_params(feat_model.wav2vec2.model)
+            print(f'XLSR params: total={ssl_total:,}, trainable={ssl_trainable:,}')
+        if hasattr(feat_model, 'w2vaasist'):
+            head_total, head_trainable = count_params(feat_model.w2vaasist)
+            print(f'AASIST head params: total={head_total:,}, trainable={head_trainable:,}')
+        return feat_model
+
+    feat_optimizer = build_optimizer(feat_model, args)
 
     if args.SAM or args.CSAM:
         base_optimizer = torch.optim.Adam
@@ -174,12 +246,18 @@ def train(args):
         atadd_t1_trainset = atadd_dataset(
             args.atadd_t1_train_audio,
             args.atadd_t1_train_label,
-            audio_length=args.audio_len
+            rawboost=getattr(args, 'use_rawboost', False),
+            audio_length=args.audio_len,
+            is_train=True,
+            args=args
         )
         atadd_t1_devset = atadd_dataset(
             args.atadd_t1_dev_audio,
             args.atadd_t1_dev_label,
-            audio_length=args.audio_len
+            rawboost=getattr(args, 'use_rawboost', False),
+            audio_length=args.audio_len,
+            is_train=False,
+            args=args
         )
         train_set = [atadd_t1_trainset]
         dev_set = [atadd_t1_devset]
@@ -188,12 +266,18 @@ def train(args):
         atadd_t2_trainset = atadd_dataset(
             args.atadd_t2_train_audio,
             args.atadd_t2_train_label,
-            audio_length=args.audio_len
+            rawboost=getattr(args, 'use_rawboost', False),
+            audio_length=args.audio_len,
+            is_train=True,
+            args=args
         )
         atadd_t2_devset = atadd_dataset(
             args.atadd_t2_dev_audio,
             args.atadd_t2_dev_label,
-            audio_length=args.audio_len
+            rawboost=getattr(args, 'use_rawboost', False),
+            audio_length=args.audio_len,
+            is_train=False,
+            args=args
         )
         train_set = [atadd_t2_trainset]
         dev_set = [atadd_t2_devset]
@@ -243,6 +327,15 @@ def train(args):
     else:
         criterion = nn.BCEWithLogitsLoss()
 
+    am_in_dim = feat_model.w2vaasist.out_layer.in_features if hasattr(feat_model, 'w2vaasist') and hasattr(feat_model.w2vaasist, 'out_layer') else None
+    criterion_am = AMSoftmaxLoss(in_dim=am_in_dim, num_cls=2).to(args.device) if am_in_dim is not None else None
+    criterion_con = SupConLoss(temperature=0.07).to(args.device)
+    use_custom_loss = criterion_am is not None
+
+    total_steps = len(trainOriDataLoader) * args.num_epochs
+    warmup_steps = int(total_steps * 0.05)
+    scheduler = get_linear_schedule_with_warmup(feat_optimizer, warmup_steps, total_steps)
+
     prev_loss = float("inf")
     prev_eer = float("inf")
     prev_f1 = -float("inf")
@@ -252,8 +345,6 @@ def train(args):
         feat_model.train()
         trainlossDict = defaultdict(list)
         devlossDict = defaultdict(list)
-
-        adjust_learning_rate(args, args.lr, feat_optimizer, epoch_num)
 
         for i in trange(0, len(trainOriDataLoader), total=len(trainOriDataLoader), initial=0):
             try:
@@ -267,22 +358,42 @@ def train(args):
 
             if args.SAM or args.ASAM or args.CSAM:
                 enable_running_stats(feat_model)
-                feats, feat_outputs = feat_model(feat)
-                feat_loss = criterion(feat_outputs, labels)
+                raw_first, raw_second = feat_model(feat)
+                feats, feat_outputs = unpack_model_outputs(raw_first, raw_second)
+                if use_custom_loss:
+                    loss_cls = criterion_am(feats, labels)
+                    loss_con = criterion_con(feats, labels)
+                    feat_loss = loss_cls + args.lambda_con * loss_con
+                else:
+                    feat_loss = criterion(feat_outputs, labels)
                 feat_loss.mean().backward()
                 feat_optimizer.first_step(zero_grad=True)
 
                 disable_running_stats(feat_model)
-                feats, feat_outputs = feat_model(feat)
-                criterion(feat_outputs, labels).mean().backward()
+                raw_first, raw_second = feat_model(feat)
+                feats, feat_outputs = unpack_model_outputs(raw_first, raw_second)
+                if use_custom_loss:
+                    loss_cls = criterion_am(feats, labels)
+                    loss_con = criterion_con(feats, labels)
+                    (loss_cls + args.lambda_con * loss_con).mean().backward()
+                else:
+                    criterion(feat_outputs, labels).mean().backward()
                 feat_optimizer.second_step(zero_grad=True)
+                scheduler.step()
 
             else:
                 feat_optimizer.zero_grad()
-                feats, feat_outputs = feat_model(feat)
-                feat_loss = criterion(feat_outputs, labels)
+                raw_first, raw_second = feat_model(feat)
+                feats, feat_outputs = unpack_model_outputs(raw_first, raw_second)
+                if use_custom_loss:
+                    loss_cls = criterion_am(feats, labels)
+                    loss_con = criterion_con(feats, labels)
+                    feat_loss = loss_cls + args.lambda_con * loss_con
+                else:
+                    feat_loss = criterion(feat_outputs, labels)
                 feat_loss.backward()
                 feat_optimizer.step()
+                scheduler.step()
 
             trainlossDict['base_loss'].append(feat_loss.item())
 
@@ -307,7 +418,8 @@ def train(args):
                 feat = feat.to(args.device, non_blocking=True)
                 labels = labels.to(args.device, non_blocking=True)
 
-                feats, feat_outputs = feat_model(feat)
+                raw_first, raw_second = feat_model(feat)
+                feats, feat_outputs = unpack_model_outputs(raw_first, raw_second)
 
                 if args.base_loss == "bce":
                     feat_loss = criterion(feat_outputs, labels.unsqueeze(1).float())
@@ -329,6 +441,7 @@ def train(args):
                 devlossDict["base_loss"].append(feat_loss.item())
                 score_loader.append(score)
 
+                import numpy as np  # hotfix: np shadowed elsewhere
                 desc_str = ''
                 for key in sorted(devlossDict.keys()):
                     desc_str += key + ':%.5f' % (np.nanmean(devlossDict[key])) + ', '

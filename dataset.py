@@ -86,7 +86,8 @@ class AudioAugmentor:
 
 class atadd_dataset(Dataset):
     def __init__(self, path_to_audio, path_to_protocol,
-                 rawboost=False, musanrir=False, audio_length=64600):
+                 rawboost=False, musanrir=False, audio_length=64600,
+                 is_train=False, args=None):
         super(atadd_dataset, self).__init__()
 
         self.path_to_audio = path_to_audio
@@ -95,16 +96,21 @@ class atadd_dataset(Dataset):
         self.label = {"fake": 1, "real": 0}
         self.rawboost = rawboost
         self.musanrir = musanrir
-        self.AudioAugmentor = AudioAugmentor()
+        self.is_train = is_train
+        self.args = args
+        self.AudioAugmentor = AudioAugmentor() if musanrir else None
 
         self.all_files = []
         with open(self.path_to_protocol, 'r', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            for row in reader:grep -A1 "atadd_t1_train_audio" /mnt/d/project/atadd_work/code/AT-ADD-Baseline/config.py
+
                 filename = row["name"].strip()
                 label = row["label"].strip()
                 self.all_files.append((filename, label))
 
+        if args is not None and getattr(args, 'subset', None):
+            self.all_files = self.all_files[:args.subset]
     def __len__(self):
         return len(self.all_files)
 
@@ -114,9 +120,15 @@ class atadd_dataset(Dataset):
 
         waveform, sr = torchaudio_load(filepath)
 
-        if self.rawboost:
-            waveform = waveform.squeeze(dim=0).detach().cpu().numpy()
-            waveform = process_Rawboost_feature(waveform, sr=sr)
+        waveform = waveform.squeeze(dim=0)
+
+        if self.is_train and self.rawboost:
+            waveform = process_Rawboost_feature(waveform.detach().cpu().numpy(), sr=sr)
+
+        if self.is_train and self.args is not None and getattr(self.args, 'use_aug_chain', False):
+            from augment.aug_chain import AugChain
+            waveform = AugChain(p=self.args.aug_prob)(waveform.detach().cpu().numpy(), sr)
+            waveform = torch.tensor(waveform)
 
         waveform = pad_dataset(waveform, self.audio_length)
 

@@ -1,8 +1,9 @@
 
 import torch.nn as torch_nn
 import librosa
+import os
 from transformers import Wav2Vec2Config, Wav2Vec2FeatureExtractor, Wav2Vec2Model, AutoModel, AutoFeatureExtractor
-from transformers import Wav2Vec2Config, Wav2Vec2FeatureExtractor, Wav2Vec2Model
+from backbone.lora_xlsr import build_lora_xlsr
 import torch
 import torch.nn as nn
 import math
@@ -43,7 +44,11 @@ class XLSR(torch.nn.Module):
         # Load the pre-trained model configuration and weights
         self.config = Wav2Vec2Config.from_json_file(f"{model_dir}/config.json")
         self.processor = Wav2Vec2FeatureExtractor.from_pretrained(model_dir, do_normalize = False)
-        self.model = Wav2Vec2Model.from_pretrained(model_dir).to(self.device)
+        try:
+            self.model = Wav2Vec2Model.from_pretrained(model_dir).to(self.device)
+        except (OSError, FileNotFoundError):
+            print(f"Warning: pretrained XLSR weights not found in {model_dir}; initializing model from config only.")
+            self.model = Wav2Vec2Model(self.config).to(self.device)
         self.freeze = freeze
         # Enable output of hidden states
         self.model.config.output_hidden_states = True
@@ -54,6 +59,12 @@ class XLSR(torch.nn.Module):
                 param.requires_grad = False
         else:
             self.model.train()
+        
+    def apply_lora(self, r: int = 8):
+        try:
+            self.model = build_lora_xlsr(base_model=self.model, r=r)
+        except Exception as e:
+            print('Failed to apply LoRA:', e)
     def forward(self, audio_data):
         # Process the input audio using Wav2Vec2 Feature Extractor
         feat = self.processor(audio_data, sampling_rate=self.sampling_rate, return_tensors="pt").input_values.to(self.device)

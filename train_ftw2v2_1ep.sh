@@ -1,12 +1,16 @@
 python main_train.py \
   --gpu 0 \
   --train_task atadd-track1 \
-  --model aasist \
-  --lr 0.0001 \
-  --batch_size 8 \
+  --model ft-w2v2aasist \
+  --num_epochs 1 \
+  --interval 1 \
+  --seed 1234 \
+  --batch_size 1 \
+  --lr 0.000001 \
+  --xlsr /root/pretrained/wav2vec2-xls-r-300m \
   --atadd_t1_train_audio /root/atadd_data/atadd/T1/train/train \
   --atadd_t1_train_label /root/atadd_data/atadd/T1/label/train.csv \
   --atadd_t1_dev_audio /root/atadd_data/atadd/T1/dev/dev \
   --atadd_t1_dev_label /root/atadd_data/atadd/T1/label/dev.csv \
   --atadd_t1_eval_audio /root/atadd_data/atadd/T1/eval/eval \
-  --o ./ckpt_t1/baseline_aasist
+  --o ./ckpt_t1/baseline_ftw2v2_1ep

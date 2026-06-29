@@ -541,7 +541,7 @@ class SSLAASIST(nn.Module):
         last_hidden = self.drop(last_hidden)
         output = self.out_layer(last_hidden)
 
-        return last_hidden,output
+        return output, last_hidden
 
 
 class XLSRAASIST(nn.Module):

@@ -7,15 +7,15 @@ def initParams():
 
     # Train & Dev Data folder prepare
     parser.add_argument("--atadd_t1_train_audio", type=str, help="Path to the training audio for ATADD T1 dataset",
-                        default='yourpath/atadd/T1/train')
+                        default='/root/atadd_data/atadd/T1/train/train')
     parser.add_argument("--atadd_t1_train_label", type=str, help="Path to the training label for ATADD T1 dataset",
-                        default="yourpath/atadd/T1/label/train.csv")
+                        default="/root/atadd_data/atadd/T1/label/train.csv")
     parser.add_argument("--atadd_t1_dev_audio", type=str, help="Path to the development audio for ATADD T1 dataset",
-                        default='yourpath/atadd/T1/dev')
+                        default='/mnt/d/project/atadd_work/data/atadd/T1/dev/dev')
     parser.add_argument("--atadd_t1_dev_label", type=str, help="Path to the development label for ATADD T1 dataset",
-                        default="yourpath/atadd/T1/label/dev.csv")
+                        default="/mnt/d/project/atadd_work/data/atadd/T1/label/dev.csv")
     parser.add_argument("--atadd_t1_eval_audio", type=str, help="Path to the evaluation audio for ATADD T1 dataset",
-                        default='yourpath/atadd/T1/eval')
+                        default='/mnt/d/project/atadd_work/data/atadd/T1/eval/eval')
 
 
     parser.add_argument("--atadd_t2_train_audio", type=str, help="Path to the training audio for ATADD T2 dataset",
@@ -31,7 +31,8 @@ def initParams():
 
 
     # SSL folder prepare
-    parser.add_argument("--xlsr", default="yourpath/huggingface/wav2vec2-xls-r-300m")
+    parser.add_argument("--xlsr", type=str,
+                        default="/root/huggingface/wav2vec2-xls-r-300m")
     parser.add_argument("--wavlm", default="yourpath/huggingface/wavlm-large/")
     parser.add_argument("--mert", default="yourpath/huggingface/MERT-300M/")
 
@@ -53,5 +54,14 @@ def initParams():
 
     # wpt
     parser.add_argument("--num_wavelet_tokens", type=int, help="wavelet token", default=4)
+
+    parser.add_argument('--use_aug_chain', type=bool, default=False)
+    parser.add_argument('--aug_prob', type=float, default=0.3)
+    parser.add_argument('--use_rawboost', type=bool, default=False)
+    parser.add_argument('--lambda_con', type=float, default=0.1)
+    parser.add_argument('--use_lora', type=bool, default=False)
+    parser.add_argument('--lora_r', type=int, default=8)
+    parser.add_argument('--dry_run', action='store_true', help='Only print model/LoRA parameter counts and exit')
+    parser.add_argument('--subset', type=int, default=None, help='Use only N samples for quick ablation')
 
     return parser

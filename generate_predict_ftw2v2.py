@@ -1,7 +1,7 @@
 import csv
 import os
 
-input_csv = "./ckpt_t1/baseline_aasist/result/atadd-track1_logits.csv"
+input_csv = "./ckpt_t1/baseline_ftw2v2_1ep/result/atadd-track1_logits.csv"
 base_path = os.path.dirname(input_csv)
 output_csv = os.path.join(base_path, "predict.csv")
 threshold = 0.5
@@ -11,7 +11,6 @@ with open(input_csv, "r", encoding="utf-8-sig", newline="") as fin, \
 
     reader = csv.DictReader(fin)
     writer = csv.writer(fout)
-
     writer.writerow(["name", "predict"])
 
     for row in reader:
